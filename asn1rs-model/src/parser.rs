@@ -134,35 +134,55 @@ impl Tokenizer {
     pub fn parse(&self, asn: &str) -> Vec<Token> {
         let mut previous = None;
         let mut tokens = Vec::new();
+        let mut is_block_comment = false;
 
         for (line_0, line) in asn.lines().enumerate() {
             let mut token = None;
-            let content = line.split("--").next(); // get rid of one-line comments
+            let content = line.split("--").next().unwrap_or_default(); // get rid of one-line comments
 
-            for (column_0, char) in content.iter().flat_map(|c| c.chars()).enumerate() {
-                match char {
+            let mut lexems = content.chars().enumerate().peekable();
+
+            while let Some((column_0, char)) = lexems.next() {
+                match (is_block_comment, char, lexems.peek().map(|(_, c)| c)) {
                     // asn syntax
-                    ':' | ';' | '=' | '(' | ')' | '{' | '}' | '.' | ',' | '[' | ']' | '\''
-                    | '"' => {
+                    (
+                        false,
+                        ':' | ';' | '=' | '(' | ')' | '{' | '}' | '.' | ',' | '[' | ']' | '\''
+                        | '"',
+                        _,
+                    ) => {
                         token = Some(Token::Separator(
                             Location::at(line_0 + 1, column_0 + 1),
                             char,
                         ))
                     }
+                    // block comment start
+                    (false, '/', Some('*')) => {
+                        is_block_comment = true;
+                    }
+                    // block comment end
+                    (true, '*', Some('/')) => {
+                        lexems.next();
+                        is_block_comment = false;
+                    }
+
+                    // inside a block comment
+                    (true, _, _) => {}
+
                     // text
-                    c if !c.is_control() && c != ' ' => {
+                    (false, c, _) if !c.is_control() && c != ' ' => {
                         token = Some(Token::Text(
                             Location::at(line_0 + 1, column_0 + 1),
                             format!("{}", c),
                         ));
                     }
                     // text separator
-                    ' ' | '\r' | '\n' | '\t' => {
+                    (false, ' ' | '\r' | '\n' | '\t', _) => {
                         if let Some(token) = previous.take() {
                             tokens.push(token);
                         }
                     }
-                    c => eprintln!(
+                    (_, c, _) => eprintln!(
                         "Ignoring unexpected character: {}-0x{:02x}-{:03}",
                         c, c as u8, c as u8
                     ),
@@ -281,6 +301,26 @@ mod tests {
             r"
                 Some ::= None -- very clever
                         -- ignore true ::= false
+        ",
+        );
+        let mut iter = result.into_iter();
+        assert!(iter.next().unwrap().eq_text("Some"));
+        assert!(iter.next().unwrap().eq_separator(':'));
+        assert!(iter.next().unwrap().eq_separator(':'));
+        assert!(iter.next().unwrap().eq_separator('='));
+        assert!(iter.next().unwrap().eq_text("None"));
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    pub fn test_ignores_block_comments() {
+        let result = Tokenizer::default().parse(
+            r"
+                /* a block
+                 * comment
+                   here
+                 */
+                Some ::= No/* */ne
         ",
         );
         let mut iter = result.into_iter();
